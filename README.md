@@ -1,6 +1,6 @@
 # Lapsus Menu Bar App
 
-A beautiful macOS menu bar application to control [lapsus_rust](https://github.com/margooey/lapsus_rust) - a tool that randomly moves your cursor.
+A beautiful macOS menu bar application to control [lapsus_rust](https://github.com/margooey/lapsus_rust) - a tool that adds iPad-style inertial movement to your trackpad cursor.
 
 ## Features
 
@@ -11,11 +11,15 @@ A beautiful macOS menu bar application to control [lapsus_rust](https://github.c
 - 🔌 **LaunchAgent Integration** - Properly manages the macOS service
 - 📦 **Fully Portable** - Bundles lapsus_rust executable
 
+## What is Lapsus?
+
+Lapsus adds smooth, iPad-style inertial movement to your macOS trackpad cursor. When you move the cursor, it continues with momentum like iOS/iPadOS scrolling, creating a more fluid and natural cursor experience.
+
 ## Screenshots
 
 Menu bar showing status:
-- **●** = Lapsus is actively moving your cursor
-- **○** = Lapsus is stopped, cursor behaves normally
+- **●** = Lapsus is active (cursor has inertial movement)
+- **○** = Lapsus is stopped (cursor behaves normally)
 
 ## Installation
 
