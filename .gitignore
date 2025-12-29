@@ -1,0 +1,31 @@
+# Build artifacts
+target/
+*.app/
+**/.DS_Store
+
+# Cargo files
+Cargo.lock
+
+# Icon generation artifacts
+menubar_app/icon/*.png
+menubar_app/icon/AppIcon.iconset/
+menubar_app/icon/circle.svg.png
+
+# Config files
+.lapsus_menubar_config.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs
+*.log
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
