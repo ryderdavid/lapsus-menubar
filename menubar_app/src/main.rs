@@ -18,6 +18,12 @@ struct Config {
     start_at_login: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     lapsus_rust_path: Option<String>,
+    #[serde(default = "default_show_dock_icon")]
+    show_dock_icon: bool,
+}
+
+fn default_show_dock_icon() -> bool {
+    false // Default: hide from dock
 }
 
 impl Default for Config {
@@ -25,6 +31,7 @@ impl Default for Config {
         Self {
             start_at_login: false,
             lapsus_rust_path: None,
+            show_dock_icon: false,
         }
     }
 }
@@ -350,8 +357,16 @@ fn build_menu(state: &AppState) -> Result<Menu, Box<dyn std::error::Error>> {
         config.start_at_login,
         None
     );
+    let show_dock_icon = CheckMenuItem::with_id(
+        MenuId::new("show_dock_icon"),
+        "Show Dock Icon",
+        true,
+        config.show_dock_icon,
+        None
+    );
     drop(config);
     menu.append(&start_at_login)?;
+    menu.append(&show_dock_icon)?;
     
     menu.append(&PredefinedMenuItem::separator())?;
     
@@ -397,6 +412,74 @@ fn show_about_dialog() {
     }
 }
 
+fn toggle_dock_icon(show: bool, state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
+    // Save the preference
+    let mut config = state.config.lock().unwrap();
+    config.show_dock_icon = show;
+    drop(config);
+    state.save_config()?;
+    
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        
+        // Get the app bundle path
+        let current_exe = std::env::current_exe()?;
+        let bundle_path = if current_exe.to_string_lossy().contains(".app/Contents/MacOS") {
+            // Running from app bundle - find the .app
+            current_exe.parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+        } else {
+            None
+        };
+        
+        // Update Info.plist if running from bundle
+        if let Some(bundle) = bundle_path {
+            let plist_path = bundle.join("Contents/Info.plist");
+            if plist_path.exists() {
+                // Use PlistBuddy to update LSUIElement
+                let value = if show { "false" } else { "true" };
+                let _ = Command::new("/usr/libexec/PlistBuddy")
+                    .args(&["-c", &format!("Set :LSUIElement {}", value), plist_path.to_str().unwrap()])
+                    .output();
+            }
+        }
+        
+        // Notify user that restart is required
+        let message = if show {
+            "Dock icon will appear after restarting the app.\n\nQuit and relaunch Lapsus Control?"
+        } else {
+            "Dock icon will be hidden after restarting the app.\n\nQuit and relaunch Lapsus Control?"
+        };
+        
+        let result = Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display dialog \"{}\" buttons {{\"Later\", \"Restart Now\"}} default button \"Restart Now\" with title \"Restart Required\"",
+                message
+            ))
+            .output()?;
+        
+        // Check if user clicked "Restart Now"
+        let output = String::from_utf8_lossy(&result.stdout);
+        if output.contains("Restart Now") {
+            // Relaunch the app
+            let current_exe = std::env::current_exe()?;
+            Command::new("open")
+                .arg("-n")
+                .arg(bundle_path.unwrap())
+                .spawn()?;
+            std::process::exit(0);
+        }
+        
+        Ok(())
+    }
+    
+    #[cfg(not(target_os = "macos"))]
+    Ok(())
+}
+
 fn show_error_dialog(message: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -422,6 +505,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e);
         }
     };
+
+    // Set dock icon visibility based on config
+    #[cfg(target_os = "macos")]
+    {
+        let config = state.config.lock().unwrap();
+        let _show_dock = config.show_dock_icon;
+        drop(config);
+        
+        // Note: NSApplication activation policy is set via Info.plist LSUIElement=true
+        // We can't change it at runtime without restart, so we just store the preference
+        // The actual change happens on next launch via the toggle_dock_icon function
+    }
 
     // Check if lapsus_rust exists
     if !state.lapsus_path.exists() {
@@ -497,6 +592,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                     if let Err(e) = state_clone.toggle_auto_launch(!current) {
                         show_error_dialog(&format!("Failed to toggle auto-launch: {}", e));
+                    } else {
+                        // Update menu to reflect new state
+                        if let Ok(new_menu) = build_menu(&state_clone) {
+                            let tray = tray_clone.lock().unwrap();
+                            let _ = tray.set_menu(Some(Box::new(new_menu)));
+                        }
+                    }
+                }
+                "show_dock_icon" => {
+                    let config = state_clone.config.lock().unwrap();
+                    let current = config.show_dock_icon;
+                    drop(config);
+                    
+                    if let Err(e) = toggle_dock_icon(!current, &state_clone) {
+                        show_error_dialog(&format!("Failed to toggle dock icon: {}", e));
                     } else {
                         // Update menu to reflect new state
                         if let Ok(new_menu) = build_menu(&state_clone) {
