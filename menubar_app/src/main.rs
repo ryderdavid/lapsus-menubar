@@ -18,12 +18,6 @@ struct Config {
     start_at_login: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     lapsus_rust_path: Option<String>,
-    #[serde(default = "default_show_dock_icon")]
-    show_dock_icon: bool,
-}
-
-fn default_show_dock_icon() -> bool {
-    false // Default: hide from dock
 }
 
 impl Default for Config {
@@ -31,7 +25,6 @@ impl Default for Config {
         Self {
             start_at_login: false,
             lapsus_rust_path: None,
-            show_dock_icon: false,
         }
     }
 }
@@ -357,16 +350,8 @@ fn build_menu(state: &AppState) -> Result<Menu, Box<dyn std::error::Error>> {
         config.start_at_login,
         None
     );
-    let show_dock_icon = CheckMenuItem::with_id(
-        MenuId::new("show_dock_icon"),
-        "Show Dock Icon",
-        true,
-        config.show_dock_icon,
-        None
-    );
     drop(config);
     menu.append(&start_at_login)?;
-    menu.append(&show_dock_icon)?;
     
     menu.append(&PredefinedMenuItem::separator())?;
     
@@ -412,74 +397,6 @@ fn show_about_dialog() {
     }
 }
 
-fn toggle_dock_icon(show: bool, state: &AppState) -> Result<(), Box<dyn std::error::Error>> {
-    // Save the preference
-    let mut config = state.config.lock().unwrap();
-    config.show_dock_icon = show;
-    drop(config);
-    state.save_config()?;
-    
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        
-        // Get the app bundle path
-        let current_exe = std::env::current_exe()?;
-        let bundle_path = if current_exe.to_string_lossy().contains(".app/Contents/MacOS") {
-            // Running from app bundle - find the .app
-            current_exe.parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-        } else {
-            None
-        };
-        
-        // Update Info.plist if running from bundle
-        if let Some(bundle) = bundle_path {
-            let plist_path = bundle.join("Contents/Info.plist");
-            if plist_path.exists() {
-                // Use PlistBuddy to update LSUIElement
-                let value = if show { "false" } else { "true" };
-                let _ = Command::new("/usr/libexec/PlistBuddy")
-                    .args(&["-c", &format!("Set :LSUIElement {}", value), plist_path.to_str().unwrap()])
-                    .output();
-            }
-        }
-        
-        // Notify user that restart is required
-        let message = if show {
-            "Dock icon will appear after restarting the app.\n\nQuit and relaunch Lapsus Control?"
-        } else {
-            "Dock icon will be hidden after restarting the app.\n\nQuit and relaunch Lapsus Control?"
-        };
-        
-        let result = Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "display dialog \"{}\" buttons {{\"Later\", \"Restart Now\"}} default button \"Restart Now\" with title \"Restart Required\"",
-                message
-            ))
-            .output()?;
-        
-        // Check if user clicked "Restart Now"
-        let output = String::from_utf8_lossy(&result.stdout);
-        if output.contains("Restart Now") {
-            // Relaunch the app
-            let current_exe = std::env::current_exe()?;
-            Command::new("open")
-                .arg("-n")
-                .arg(bundle_path.unwrap())
-                .spawn()?;
-            std::process::exit(0);
-        }
-        
-        Ok(())
-    }
-    
-    #[cfg(not(target_os = "macos"))]
-    Ok(())
-}
-
 fn show_error_dialog(message: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -497,7 +414,7 @@ fn show_error_dialog(message: &str) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize app state
+    // Initialize app state first to read config
     let state = match AppState::new() {
         Ok(s) => s,
         Err(e) => {
@@ -505,18 +422,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(e);
         }
     };
-
-    // Set dock icon visibility based on config
-    #[cfg(target_os = "macos")]
-    {
-        let config = state.config.lock().unwrap();
-        let _show_dock = config.show_dock_icon;
-        drop(config);
-        
-        // Note: NSApplication activation policy is set via Info.plist LSUIElement=true
-        // We can't change it at runtime without restart, so we just store the preference
-        // The actual change happens on next launch via the toggle_dock_icon function
-    }
 
     // Check if lapsus_rust exists
     if !state.lapsus_path.exists() {
@@ -550,6 +455,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Timer for polling process status
     let mut last_check = std::time::Instant::now();
     let mut last_running_state = state.is_lapsus_running();
+    
+    // Track current display for auto-restart on display switch
+    #[cfg(target_os = "macos")]
+    let mut last_display_id: Option<u32> = None;
 
     event_loop.run(move |_event, _, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::WaitUntil(
@@ -600,21 +509,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                "show_dock_icon" => {
-                    let config = state_clone.config.lock().unwrap();
-                    let current = config.show_dock_icon;
-                    drop(config);
-                    
-                    if let Err(e) = toggle_dock_icon(!current, &state_clone) {
-                        show_error_dialog(&format!("Failed to toggle dock icon: {}", e));
-                    } else {
-                        // Update menu to reflect new state
-                        if let Ok(new_menu) = build_menu(&state_clone) {
-                            let tray = tray_clone.lock().unwrap();
-                            let _ = tray.set_menu(Some(Box::new(new_menu)));
-                        }
-                    }
-                }
                 "about" => {
                     show_about_dialog();
                 }
@@ -646,6 +540,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             
             last_check = std::time::Instant::now();
+        }
+        
+        // Check for display changes and auto-restart lapsus (macOS only)
+        #[cfg(target_os = "macos")]
+        {
+            use core_graphics::display::CGDisplay;
+            use core_graphics::event::CGEvent;
+            use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+            
+            // Get cursor position and determine which display it's on
+            if let Ok(source) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) {
+                if let Ok(event) = CGEvent::new(source) {
+                    let location = event.location();
+                    // Get display containing the cursor
+                    if let Ok(displays) = CGDisplay::active_displays() {
+                        for display_id in displays {
+                            let display = CGDisplay::new(display_id);
+                            let bounds = display.bounds();
+                            
+                            // Check if cursor is within this display's bounds
+                            if location.x >= bounds.origin.x && location.x <= bounds.origin.x + bounds.size.width &&
+                               location.y >= bounds.origin.y && location.y <= bounds.origin.y + bounds.size.height {
+                                
+                                // Display changed?
+                                if let Some(last_id) = last_display_id {
+                                    if last_id != display_id && state_clone.is_lapsus_running() {
+                                        // Cursor moved to different display while lapsus is running
+                                        // Quick restart: disable and re-enable within ~50ms
+                                        let _ = state_clone.stop_lapsus();
+                                        std::thread::sleep(Duration::from_millis(50));
+                                        let _ = state_clone.start_lapsus();
+                                    }
+                                }
+                                last_display_id = Some(display_id);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     });
 }
